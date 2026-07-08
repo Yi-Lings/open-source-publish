@@ -154,7 +154,7 @@ git add -A && git commit -m "sync: <摘要>" && git push
 rm -rf "C:/Users/Admin/Desktop/<repo>-update"
 ```
 
-先 `gh repo list | grep <repo>` 确认存在。
+先 `gh repo list | grep <repo>` 确认存在。迭代涉及功能变更时同步更新 README.md。
 
 ## 踩坑
 
