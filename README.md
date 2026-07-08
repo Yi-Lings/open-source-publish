@@ -24,9 +24,9 @@
 ### 方式一：AI 智能体直接安装（推荐）
 
 在 Claude Code 中输入：
-
-> 请帮我装 https://github.com/Yi-Lings/open-source-publish 这个 skill
-
+```bash
+请帮我装 https://github.com/Yi-Lings/open-source-publish 这个 skill
+```
 ### 方式二：手动安装
 
 ```bash
