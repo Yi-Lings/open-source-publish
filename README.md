@@ -30,7 +30,7 @@
 
 ```bash
 git clone https://github.com/Yi-Lings/open-source-publish.git
-cp open-source-publish/SKILL.md ~/.claude/skills/open-source-publish/
+cp -r open-source-publish ~/.claude/skills/open-source-publish/
 ```
 
 ## 使用说明
@@ -39,7 +39,7 @@ cp open-source-publish/SKILL.md ~/.claude/skills/open-source-publish/
 
 在 Claude Code 中输入 `帮我开源 <skill-name> 这个 skill`：
 1. 自动识别为 **Skill** 类型
-2. 只复制 SKILL.md 到隔离目录
+2. 复制 SKILL.md + 必要附属脚本（如 `.py`/`.js`/`.sh`）到隔离目录
 3. 生成 README.md + LICENSE
 4. `git init` → `add` → `commit`
 5. `gh repo create --public --push`

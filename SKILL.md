@@ -26,7 +26,7 @@ allowed-tools: Bash(*) Read(*) Write(*) Edit(*) Glob(*) Grep(*)
 
 | 条件 | 类型 | 说明 |
 |------|------|------|
-| 路径包含 `.claude/skills/` 或用户明确提到 "skill" | **Skill** | Claude Code 技能，只保留 SKILL.md |
+| 路径包含 `.claude/skills/` 或用户明确提到 "skill" | **Skill** | Claude Code 技能，保留 SKILL.md + 必要附属脚本 |
 | 路径是文件（`.py`/`.js`/`.ts`/`.sh`/`.ps1`/`.go`/`.rs`/`.rb` 等） | **脚本** | 单文件工具脚本 |
 | 路径是目录，内含多文件源码 | **小型项目** | 有目录结构的完整小项目 |
 | 用户未提供路径/仅提供描述 | **Skill** (默认) | 先按 Skill 处理，同时询问确认路径 |
@@ -39,7 +39,7 @@ allowed-tools: Bash(*) Read(*) Write(*) Edit(*) Glob(*) Grep(*)
 
 | 类型 | 保留的文件 | 额外操作 |
 |------|-----------|----------|
-| **Skill** | `SKILL.md` + `README.md` + `LICENSE` | 删除所有其他文件 |
+| **Skill** | `SKILL.md` + 必要附属脚本（`.py`/`.js`/`.sh` 等）+ `README.md` + `LICENSE` | 删除 `.claude/` `references/` `responses/` `.env` 等非必要文件，保留功能所需的脚本 |
 | **脚本** | `<主脚本文件>` + `README.md` + `LICENSE` | 只保留主文件及配套数据文件（如 `requirements.txt`、`package.json`） |
 | **小型项目** | 完整的源码目录结构 | 只删除通用排除列表中的内容，保留项目骨架 |
 
@@ -77,7 +77,7 @@ allowed-tools: Bash(*) Read(*) Write(*) Edit(*) Glob(*) Grep(*)
 
 ```bash
 git clone https://github.com/<user>/<repo>.git
-cp <repo>/SKILL.md ~/.claude/skills/<repo>/
+cp -r <repo> ~/.claude/skills/<repo>/
 ```
 
 ## 使用说明
@@ -165,6 +165,8 @@ MIT
 REPO="my-skill"; DESC="一行描述"
 mkdir -p "/c/Users/Admin/Desktop/$REPO"
 cp /path/to/SKILL.md "/c/Users/Admin/Desktop/$REPO/"
+# 如有必要附属脚本，一并复制
+cp /path/to/companion.py "/c/Users/Admin/Desktop/$REPO/"
 # 写 README.md + LICENSE
 
 cd "/c/Users/Admin/Desktop/$REPO"
@@ -253,7 +255,8 @@ rm -rf "C:/Users/Admin/Desktop/<repo>-update"
 - [ ] 按类型执行了对应的清洗规则？
 - [ ] 无硬编码 API Key / 密码 / Token？
 - [ ] README 协议章节顺序正确（功能 → 环境要求 → 安装说明 → 使用说明 → License）？
-- [ ] Skill 类型：README 含"AI 安装" + "手动安装"两种方式？
+- [ ] Skill 类型：README 含"AI 安装" + "手动安装"两种方式，手动安装用 `cp -r` 复制整个目录？
+- [ ] Skill 类型：必要附属脚本（`.py`/`.js`/`.sh` 等）已一并保留？
 - [ ] 脚本/项目类型：README 含命令行使用示例？
 - [ ] `git config user.email` 已设（local）？
 - [ ] `gh repo create` 参数完整（`--source=. --push`）？
