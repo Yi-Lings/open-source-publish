@@ -11,6 +11,7 @@
 - **提交**：`git init` → `add` → `commit` 一键完成
 - **发布**：通过 `gh repo create` 创建公开仓库并 push
 - **清理**：发布完成后自动删除临时目录
+- **检查**：自动在浏览器打开 GitHub 仓库页供确认
 
 ## 环境要求
 
@@ -44,6 +45,7 @@ cp -r open-source-publish ~/.claude/skills/open-source-publish/
 4. `git init` → `add` → `commit`
 5. `gh repo create --public --push`
 6. 清理临时目录
+7. 自动在浏览器打开 GitHub 页面供检查
 
 ### 发布脚本（.py / .js / .sh 等）
 
@@ -72,6 +74,9 @@ git add -A && git commit -m "sync: <变更摘要>"
 git push
 
 rm -rf "/c/Users/Admin/Desktop/open-source-publish-update"
+
+# 自动打开 GitHub 页面供检查
+start https://github.com/Yi-Lings/open-source-publish
 ```
 
 ## License

@@ -11,7 +11,7 @@ allowed-tools: Bash(*) Read(*) Write(*) Edit(*) Glob(*) Grep(*)
 ## 流程
 
 ```
-1. 判断 → 2. 清洗 → 3. 隔离 → 4. 文档(README+LICENSE) → 5. 提交(git init→add→commit) → 6. 发布(gh repo create --public --push) → 7. 清理(rm -rf <repo-dir>)
+1. 判断 → 2. 清洗 → 3. 隔离 → 4. 文档(README+LICENSE) → 5. 提交(git init→add→commit) → 6. 发布(gh repo create --public --push) → 7. 清理(rm -rf <repo-dir>) → 8. 打开浏览器供检查(start https://github.com/<user>/<repo>)
 ```
 
 ## 类型判断
@@ -141,6 +141,9 @@ git init && git config user.email "u@users.noreply.github.com" && git config use
 git add -A && git commit -m "init: $DESC"
 gh repo create "$REPO" --public --description "$DESC" --source=. --remote=origin --push
 rm -rf "/c/Users/Admin/Desktop/$REPO"
+
+# 打开 GitHub 页面供检查
+start "https://github.com/<user>/$REPO"
 ```
 
 ## 迭代同步
@@ -152,6 +155,9 @@ cd "C:/Users/Admin/Desktop/<repo>-update"
 git config user.email "github-actions@localhost" && git config user.name "<user>"
 git add -A && git commit -m "sync: <摘要>" && git push
 rm -rf "C:/Users/Admin/Desktop/<repo>-update"
+
+# 打开 GitHub 页面供检查
+start "https://github.com/<user>/<repo>"
 ```
 
 先 `gh repo list | grep <repo>` 确认存在。迭代涉及功能变更时同步更新 README.md。
@@ -169,9 +175,9 @@ rm -rf "C:/Users/Admin/Desktop/<repo>-update"
 
 ## 自检清单
 
-**首次发布：** 类型判断正确？清洗规则匹配？无 API Key/Token？README 章节顺序正确？Skill 附带脚本已保留？`git config` 已设？`gh repo create` 含 `--source=. --push`？临时目录已清理？
+**首次发布：** 类型判断正确？清洗规则匹配？无 API Key/Token？README 章节顺序正确？Skill 附带脚本已保留？`git config` 已设？`gh repo create` 含 `--source=. --push`？临时目录已清理？GitHub 页面已打开供检查？
 
-**迭代同步：** repo 存在？克隆到隔离目录？文件已同步？`git config` 已设？commit 信息 `sync:` 格式？临时目录已清理？
+**迭代同步：** repo 存在？克隆到隔离目录？文件已同步？`git config` 已设？commit 信息 `sync:` 格式？临时目录已清理？GitHub 页面已打开供检查？
 
 ## 触发
 
