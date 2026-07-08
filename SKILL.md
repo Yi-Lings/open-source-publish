@@ -39,9 +39,89 @@ allowed-tools: Bash(*) Read(*) Write(*) Edit(*) Glob(*) Grep(*)
 
 章节顺序统一：`功能 → 环境要求 → 安装说明 → 使用说明 → License`
 
-- **Skill**：安装需含"AI 直接安装" + "手动安装(`cp -r` 复制整个目录)" 两种方式；使用说明强调关键词触发
-- **脚本**：安装写 clone + 依赖；使用说明给命令行参数表格和 2-3 个示例
-- **项目**：安装写 clone + 构建；使用说明含运行/测试/配置方式
+### Skill
+
+```markdown
+# <repo>
+
+一句话描述功能。
+
+## 功能
+- 要点
+
+## 环境要求
+- Claude Code
+- [可选] 其他依赖
+
+## 安装说明
+### 方式一：AI 智能体直接安装（推荐）
+在 AI 助手中输入：
+> 请帮我装 https://github.com/<user>/<repo> 这个 skill
+
+### 方式二：手动安装
+
+    git clone https://github.com/<user>/<repo>.git
+    cp -r <repo> ~/.claude/skills/<repo>/
+
+## 使用说明
+在 Claude Code 中输入关键词触发。
+
+## License
+MIT
+```
+
+### 脚本
+
+```markdown
+# <repo>
+
+一句话描述脚本功能。
+
+## 功能
+- 要点
+
+## 环境要求
+- Python 3.x / Node.js x.x / Bash 等
+
+## 安装说明
+
+    git clone https://github.com/<user>/<repo>.git
+    cd <repo>
+    pip install -r requirements.txt  # 或 npm install
+
+## 使用说明
+
+    python <script>.py <参数>
+    ./<script>.sh <参数>
+
+## License
+MIT
+```
+
+### 项目
+
+```markdown
+# <repo>
+
+一句话描述。
+
+## 功能
+
+## 环境要求
+
+## 安装说明
+
+    git clone https://github.com/<user>/<repo>.git
+    cd <repo>
+    # 安装依赖 / 构建
+
+## 使用说明
+
+    # 运行 / 使用示例
+
+## License
+MIT
+```
 
 ## 首次发布（通用）
 
