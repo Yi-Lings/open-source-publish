@@ -3,7 +3,7 @@ name: Build one-off patched sub2api image
 on:
   push:
     branches:
-      - ci/sub2api-thinking-build-20261110
+      - ci/sub2api-hide-thinking-v2-20261110
     paths:
       - '.github/workflows/build-sub2api-thinking-20261110.yml'
       - 'ci/sub2api-thinking-20261110/**'
@@ -12,7 +12,7 @@ permissions:
   contents: write
 
 concurrency:
-  group: sub2api-thinking-build-20261110
+  group: sub2api-thinking-build-v2-20261110
   cancel-in-progress: false
 
 jobs:
@@ -29,27 +29,64 @@ jobs:
           curl --fail --location --retry 3 --silent --show-error 'https://api.github.com/repos/Wei-Shaw/sub2api/tarball/dab829a4e9b7d1cc307189aea8b0319eb29e29d0' | tar -xz -C src --strip-components=1
           cd src
           patch -p1 < "$GITHUB_WORKSPACE/ci/sub2api-thinking-20261110/feature.patch"
-      - name: Build patched Docker image
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: src/backend/go.mod
+          cache: true
+          cache-dependency-path: src/backend/go.sum
+      - name: Run reasoning visibility regression tests
         shell: bash
         run: |
           set -euo pipefail
-          docker build --build-arg COMMIT=dab829a4e9b7d1cc307189aea8b0319eb29e29d0 --build-arg VERSION=0.2.20-thinking-all -t local/sub2api:thinking-all-20261110 ./src
+          cd src/backend
+          gofmt -w internal/service/gateway_hide_thinking.go internal/service/gateway_hide_thinking_test.go
+          go test ./internal/service -run '^(TestHideThinkingOutputPerAccount|TestOmitAnthropicThinkingText|TestOmitGeminiThinkingTextPreservesEffortAndSignature|TestOmitOpenAIReasoningSummaryPreservesEffort|TestRedactAnthropicThinkingSSELine|TestRedactAnthropicThinkingJSON)
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker build --build-arg COMMIT=dab829a4e9b7d1cc307189aea8b0319eb29e29d0 --build-arg VERSION=0.2.20-thinking-v2 -t local/sub2api:thinking-v2-20261110 ./src
       - name: Package image for VPS import
         shell: bash
         run: |
           set -euo pipefail
-          docker save local/sub2api:thinking-all-20261110 | gzip -1 > sub2api-thinking-all-20261110.tar.gz
-          sha256sum sub2api-thinking-all-20261110.tar.gz > sub2api-thinking-all-20261110.tar.gz.sha256
-          ls -lh sub2api-thinking-all-20261110.tar.gz
+          docker save local/sub2api:thinking-v2-20261110 | gzip -1 > sub2api-thinking-v2-20261110.tar.gz
+          sha256sum sub2api-thinking-v2-20261110.tar.gz > sub2api-thinking-v2-20261110.tar.gz.sha256
+          ls -lh sub2api-thinking-v2-20261110.tar.gz
       - name: Publish temporary public prerelease build artifact
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          gh release create sub2api-thinking-20261110 \
-            sub2api-thinking-all-20261110.tar.gz \
-            sub2api-thinking-all-20261110.tar.gz.sha256 \
+          gh release create sub2api-thinking-v2-20261110 \
+            sub2api-thinking-v2-20261110.tar.gz \
+            sub2api-thinking-v2-20261110.tar.gz.sha256 \
+            --target "$GITHUB_SHA" \
+            --prerelease --latest=false \
+            --title 'Sub2API thinking visibility build (temporary)' \
+            --notes 'Temporary one-off Docker image build of pinned upstream Wei-Shaw/sub2api with per-account thinking-output toggles. No VPS credentials or production data included.'
+ -count=1 -timeout 10m
+      - name: Build patched Docker image
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker build --build-arg COMMIT=dab829a4e9b7d1cc307189aea8b0319eb29e29d0 --build-arg VERSION=0.2.20-thinking-v2 -t local/sub2api:thinking-v2-20261110 ./src
+      - name: Package image for VPS import
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker save local/sub2api:thinking-v2-20261110 | gzip -1 > sub2api-thinking-v2-20261110.tar.gz
+          sha256sum sub2api-thinking-v2-20261110.tar.gz > sub2api-thinking-v2-20261110.tar.gz.sha256
+          ls -lh sub2api-thinking-v2-20261110.tar.gz
+      - name: Publish temporary public prerelease build artifact
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release create sub2api-thinking-v2-20261110 \
+            sub2api-thinking-v2-20261110.tar.gz \
+            sub2api-thinking-v2-20261110.tar.gz.sha256 \
             --target "$GITHUB_SHA" \
             --prerelease --latest=false \
             --title 'Sub2API thinking visibility build (temporary)' \
