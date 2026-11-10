@@ -22,6 +22,45 @@
  	if s.shouldInjectAnthropicCacheTTL1h(ctx, account) {
  		if err := replaceBody(injectAnthropicCacheControlTTL1h(body)); err != nil {
  			return nil, err
+--- a/backend/internal/service/gateway_upstream_response.go
++++ b/backend/internal/service/gateway_upstream_response.go
+@@ -993,6 +993,9 @@
+ 			}
+ 		}
+ 
++		if account.HideThinkingOutputEnabled() {
++			eventChanged = redactAnthropicReadableThinkingEvent(event) || eventChanged
++		}
+ 		usagePatch := s.extractSSEUsagePatch(event)
+ 		if anthropicStreamEventIsTerminal(eventName, dataLine) {
+ 			sawTerminalEvent = true
+@@ -1477,6 +1480,7 @@
+ 	}
+ 
+ 	body = reverseToolNamesIfPresent(c, body)
++	body = redactAnthropicThinkingJSON(body, account.HideThinkingOutputEnabled())
+ 
+ 	// 写入响应
+ 	c.Data(resp.StatusCode, contentType, body)
+--- a/backend/internal/service/gateway_anthropic_passthrough.go
++++ b/backend/internal/service/gateway_anthropic_passthrough.go
+@@ -561,7 +561,7 @@
+ 			}
+ 
+ 			if !clientDisconnected {
+-				restored := string(reverseToolNamesIfPresent(c, []byte(line)))
++				restored := string(reverseToolNamesIfPresent(c, []byte(redactAnthropicThinkingSSELine(line, account.HideThinkingOutputEnabled()))))
+ 				if _, err := io.WriteString(w, restored); err != nil {
+ 					clientDisconnected = true
+ 					logger.LegacyPrintf("service.gateway", "[Anthropic passthrough] Client disconnected during streaming, continue draining upstream for usage: account=%d", account.ID)
+@@ -895,6 +895,7 @@
+ 		contentType = "application/json"
+ 	}
+ 	body = reverseToolNamesIfPresent(c, body)
++	body = redactAnthropicThinkingJSON(body, account.HideThinkingOutputEnabled())
+ 	c.Data(resp.StatusCode, contentType, body)
+ 	return usage, nil
+ }
 --- a/backend/internal/service/gemini_messages_compat_service.go
 +++ b/backend/internal/service/gemini_messages_compat_service.go
 @@ -560,7 +560,7 @@
@@ -104,10 +143,11 @@
      })
 --- /dev/null
 +++ b/backend/internal/service/gateway_hide_thinking.go
-@@ -0,0 +1,76 @@
+@@ -0,0 +1,149 @@
 +package service
 +
 +import (
++    "encoding/json"
 +    "strings"
 +
 +    "github.com/Wei-Shaw/sub2api/internal/pkg/claude"
@@ -133,11 +173,11 @@
 +    if model == "" { model = gjson.GetBytes(body, "model").String() }
 +    thinkingType := gjson.GetBytes(body, "thinking.type").String()
 +    if claude.IsOpus55(model) || claude.IsSonnet55(model) || claude.IsHaiku55(model) {
-+        // The Sonnet 5.5 between_tools mode intentionally disallows display.
-+        if thinkingType != "" && thinkingType != "adaptive" { return body }
-+        next, err := sjson.SetBytes(body, "thinking.type", "adaptive")
-+        if err != nil { return body }
-+        next, err = sjson.SetBytes(next, "thinking.display", "omitted")
++        // Do not turn on adaptive thinking if the client did not request it.
++        // Newer models already default to omitted display. Preserve the
++        // requested mode, budget, and effort to avoid unintended extra cost.
++        if thinkingType != "adaptive" { return body }
++        next, err := sjson.SetBytes(body, "thinking.display", "omitted")
 +        if err == nil { return next }
 +        return body
 +    }
@@ -181,9 +221,81 @@
 +    }
 +    return next
 +}
++
++
++// redactAnthropicReadableThinkingEvent only alters client-visible plaintext.
++// Signed deltas and content-block boundaries must remain intact for tool-use
++// round trips, including models with encrypted thinking history.
++func redactAnthropicReadableThinkingEvent(event map[string]any) bool {
++    if event == nil { return false }
++    switch event["type"] {
++    case "content_block_start":
++        block, ok := event["content_block"].(map[string]any)
++        if ok && block["type"] == "thinking" {
++            if txt, ok := block["thinking"].(string); ok && txt != "" {
++                block["thinking"] = ""
++                return true
++            }
++        }
++    case "content_block_delta":
++        delta, ok := event["delta"].(map[string]any)
++        if ok && delta["type"] == "thinking_delta" {
++            if txt, ok := delta["thinking"].(string); ok && txt != "" {
++                delta["thinking"] = ""
++                return true
++            }
++        }
++    case "message_start":
++        if msg, ok := event["message"].(map[string]any); ok {
++            return redactAnthropicThinkingContent(msg)
++        }
++    }
++    return false
++}
++
++func redactAnthropicThinkingContent(msg map[string]any) bool {
++    items, ok := msg["content"].([]any)
++    if !ok { return false }
++    changed := false
++    for _, item := range items {
++        b, ok := item.(map[string]any)
++        if !ok || b["type"] != "thinking" { continue }
++        if txt, ok := b["thinking"].(string); ok && txt != "" {
++            b["thinking"] = ""
++            changed = true
++        }
++    }
++    return changed
++}
++
++// Applied after usage accounting, just before sending downstream JSON.
++func redactAnthropicThinkingJSON(body []byte, enabled bool) []byte {
++    if !enabled { return body }
++    var msg map[string]any
++    if json.Unmarshal(body, &msg) != nil { return body }
++    if !redactAnthropicThinkingContent(msg) { return body }
++    output, err := json.Marshal(msg)
++    if err != nil { return body }
++    return output
++}
++
++// Applied to a single SSE data line (event framing remains unmodified).
++// Invalid JSON is passed through; valid thinking deltas are emptied.
++func redactAnthropicThinkingSSELine(line string, enabled bool) string {
++    if !enabled { return line }
++    if !strings.HasPrefix(line, "data:") { return line }
++    start := len("data:")
++    for start < len(line) && (line[start] == ' ' || line[start] == '\t') { start++ }
++    var obj map[string]any
++    if json.Unmarshal([]byte(line[start:]), &obj) != nil { return line }
++    if !redactAnthropicReadableThinkingEvent(obj) { return line }
++    b, err := json.Marshal(obj)
++    if err != nil { return line }
++    return line[:start] + string(b)
++}
 --- /dev/null
 +++ b/backend/internal/service/gateway_hide_thinking_test.go
-@@ -0,0 +1,47 @@
+@@ -0,0 +1,85 @@
 +package service
 +
 +import (
@@ -200,8 +312,13 @@
 +func TestOmitAnthropicThinkingText(t *testing.T) {
 + original := []byte(`{"model":"claude-opus-5-5","messages":[{"role":"assistant","content":[{"type":"thinking","thinking":"","signature":"keep-signed"}]}]}`)
 + out := omitAnthropicThinkingText(original, "claude-opus-5-5", true)
++ // A display-only flag must not enable adaptive reasoning on its own.
++ require.Equal(t, string(original), string(out))
++ requested := []byte(`{"model":"claude-opus-5-5","thinking":{"type":"adaptive"},"output_config":{"effort":"max"},"messages":[{"role":"assistant","content":[{"type":"thinking","thinking":"","signature":"keep-signed"}]}]}`)
++ out = omitAnthropicThinkingText(requested, "claude-opus-5-5", true)
 + require.Equal(t, "omitted", gjson.GetBytes(out, "thinking.display").String())
 + require.Equal(t, "adaptive", gjson.GetBytes(out, "thinking.type").String())
++ require.Equal(t, "max", gjson.GetBytes(out, "output_config.effort").String())
 + require.Equal(t, "keep-signed", gjson.GetBytes(out, "messages.0.content.0.signature").String())
 + require.Equal(t, string(original), string(omitAnthropicThinkingText(original,"claude-opus-5-5",false)))
 + b := []byte(`{"model":"claude-sonnet-5-5","thinking":{"type":"between_tools"}}`)
@@ -231,3 +348,38 @@
 +    require.Equal(t, "high", gjson.GetBytes(omitted, "reasoning.effort").String())
 +    require.Equal(t, "hello", gjson.GetBytes(omitted, "input").String())
 +}
++
++func TestRedactAnthropicThinkingSSELine(t *testing.T) {
++    thinking := `data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"private summary"}}`
++    cleaned := redactAnthropicThinkingSSELine(thinking, true)
++    require.Equal(t, "", gjson.Get(cleaned[6:], "delta.thinking").String())
++    require.Equal(t, "thinking_delta", gjson.Get(cleaned[6:], "delta.type").String())
++    require.Equal(t, int64(0), gjson.Get(cleaned[6:], "index").Int())
++    require.Equal(t, thinking, redactAnthropicThinkingSSELine(thinking, false))
++    require.Equal(t, cleaned, redactAnthropicThinkingSSELine(cleaned, true))
++
++    signature := `data: {"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"opaque-full-thinking"}}`
++    require.Equal(t, signature, redactAnthropicThinkingSSELine(signature, true))
++    tool := `data: {"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"toolu_1","name":"test","input":{}}}`
++    require.Equal(t, tool, redactAnthropicThinkingSSELine(tool, true))
++    text := `data: {"type":"content_block_delta","index":2,"delta":{"type":"text_delta","text":"Final answer"}}`
++    require.Equal(t, text, redactAnthropicThinkingSSELine(text, true))
++    usage := `data: {"type":"message_delta","usage":{"output_tokens":41253}}`
++    require.Equal(t, usage, redactAnthropicThinkingSSELine(usage, true))
++    invalid := "data: {invalid"
++    require.Equal(t, invalid, redactAnthropicThinkingSSELine(invalid, true))
++}
++
++func TestRedactAnthropicThinkingJSON(t *testing.T) {
++    original := []byte(`{"content":[{"type":"thinking","thinking":"sensitive summary","signature":"opaque"},{"type":"tool_use","id":"toolu_1","name":"test","input":{"x":1}},{"type":"text","text":"Done"}],"usage":{"output_tokens":41253}}`)
++    require.Equal(t, string(original), string(redactAnthropicThinkingJSON(original,false)))
++    cleaned := redactAnthropicThinkingJSON(original,true)
++    require.Equal(t, "", gjson.GetBytes(cleaned,"content.0.thinking").String())
++    require.Equal(t, "opaque", gjson.GetBytes(cleaned,"content.0.signature").String())
++    require.Equal(t, "toolu_1", gjson.GetBytes(cleaned,"content.1.id").String())
++    require.Equal(t, int64(1), gjson.GetBytes(cleaned,"content.1.input.x").Int())
++    require.Equal(t, "Done", gjson.GetBytes(cleaned,"content.2.text").String())
++    require.Equal(t, int64(41253), gjson.GetBytes(cleaned,"usage.output_tokens").Int())
++}
+
+[executed on device: vps3506946 (68244f99-600d-4fbc-b875-a7daad5dec9a)]
