@@ -8,7 +8,7 @@ on:
       - '.github/workflows/sub2api-upstream-patch.yml'
       - 'ci/sub2api-maintained/**'
   schedule:
-    - cron: '20 2 * * *'
+    - cron: '17 */6 * * *'
   workflow_dispatch:
 
 permissions:
