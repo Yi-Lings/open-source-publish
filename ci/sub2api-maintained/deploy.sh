@@ -9,6 +9,7 @@ REPO=Yi-Lings/open-source-publish
 COMPOSE="$ROOT/docker-compose.yml"
 COMPAT="$ROOT/docker-compose.compat.yml"
 case "$MODE" in --check|--apply) ;; *) echo "Usage: $0 --check | --apply [release-tag]" >&2; exit 2;; esac
+cd "$ROOT"
 
 # Read only successful, published releases with the expected asset names.
 LATEST="$(python3 - "$REPO" <<'PY'
