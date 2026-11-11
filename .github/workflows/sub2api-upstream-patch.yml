@@ -1,0 +1,113 @@
+name: sub2api upstream patch build
+
+on:
+  push:
+    branches:
+      - master
+    paths:
+      - '.github/workflows/sub2api-upstream-patch.yml'
+      - 'ci/sub2api-maintained/**'
+  schedule:
+    - cron: '20 2 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: sub2api-upstream-patch
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Find latest upstream, test and package
+    runs-on: ubuntu-latest
+    timeout-minutes: 65
+    steps:
+      - uses: actions/checkout@v4
+      - name: Resolve upstream release and patch revision
+        id: release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          upstream_tag="$(gh api repos/Wei-Shaw/sub2api/releases/latest --jq .tag_name)"
+          if ! [[ "$upstream_tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Unrecognized upstream version: $upstream_tag" >&2
+            exit 1
+          fi
+          version="${upstream_tag#v}"
+          patch_sha="$(sha256sum ci/sub2api-maintained/feature.patch | cut -c1-12)"
+          release_tag="sub2api-patched-${upstream_tag}-${patch_sha}"
+          image_tag="local/sub2api:patched-${version}-${patch_sha}"
+          echo "upstream_tag=$upstream_tag" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "release_tag=$release_tag" >> "$GITHUB_OUTPUT"
+          echo "image_tag=$image_tag" >> "$GITHUB_OUTPUT"
+          if gh release view "$release_tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "Already published: $release_tag"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+            echo "Building: $release_tag"
+          fi
+      - name: Fetch selected upstream release and apply standalone patch
+        if: steps.release.outputs.skip != 'true'
+        shell: bash
+        env:
+          UPSTREAM_TAG: ${{ steps.release.outputs.upstream_tag }}
+        run: |
+          set -euo pipefail
+          mkdir src
+          curl --fail --location --retry 3 --silent --show-error             "https://api.github.com/repos/Wei-Shaw/sub2api/tarball/${UPSTREAM_TAG}"             | tar -xz -C src --strip-components=1
+          cd src
+          patch --batch --forward --fuzz=0 -p1 < "$GITHUB_WORKSPACE/ci/sub2api-maintained/feature.patch"
+          if find . -name '*.rej' | grep -q .; then
+            echo "Patch conflicts with upstream $UPSTREAM_TAG. No image will be published." >&2
+            exit 1
+          fi
+      - uses: actions/setup-go@v6
+        if: steps.release.outputs.skip != 'true'
+        with:
+          go-version-file: src/backend/go.mod
+          cache: true
+          cache-dependency-path: src/backend/go.sum
+      - name: Verify thinking filtering and signatures
+        if: steps.release.outputs.skip != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd src/backend
+          gofmt -w internal/service/gateway_hide_thinking.go internal/service/gateway_hide_thinking_test.go
+          go test ./internal/service -run '^Test(HideThinkingOutputPerAccount|OmitAnthropicThinkingText|OmitGeminiThinkingTextPreservesEffortAndSignature|OmitOpenAIReasoningSummaryPreservesEffort|RedactAnthropicThinkingSSELine|RedactAnthropicThinkingJSON)$' -count=1 -timeout 10m
+      - name: Build upstream release with custom patch
+        if: steps.release.outputs.skip != 'true'
+        shell: bash
+        env:
+          VERSION: ${{ steps.release.outputs.version }}
+          IMAGE_TAG: ${{ steps.release.outputs.image_tag }}
+        run: |
+          set -euo pipefail
+          docker build --build-arg "VERSION=${VERSION}-thinking" -t "$IMAGE_TAG" ./src
+      - name: Package verified image
+        if: steps.release.outputs.skip != 'true'
+        shell: bash
+        env:
+          IMAGE_TAG: ${{ steps.release.outputs.image_tag }}
+        run: |
+          set -euo pipefail
+          docker save "$IMAGE_TAG" | gzip -1 > sub2api-patched-image.tar.gz
+          sha256sum sub2api-patched-image.tar.gz > sub2api-patched-image.tar.gz.sha256
+          ls -lh sub2api-patched-image.tar.gz
+      - name: Publish version-specific release for safe VPS deployment
+        if: steps.release.outputs.skip != 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.release.outputs.release_tag }}
+          UPSTREAM_TAG: ${{ steps.release.outputs.upstream_tag }}
+          IMAGE_TAG: ${{ steps.release.outputs.image_tag }}
+        run: |
+          set -euo pipefail
+          gh release create "$RELEASE_TAG"             sub2api-patched-image.tar.gz             sub2api-patched-image.tar.gz.sha256             --target "$GITHUB_SHA" --prerelease --latest=false             --title "Sub2API ${UPSTREAM_TAG} + thinking-output patch"             --notes "Upstream: Wei-Shaw/sub2api ${UPSTREAM_TAG}. Container: ${IMAGE_TAG}. Patch: ci/sub2api-maintained/feature.patch at commit ${GITHUB_SHA}. Includes per-account thinking visibility controls. If patching, tests or image build fail, no new release is published. Production deployment is an explicit separate operation."
