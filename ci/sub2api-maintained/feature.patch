@@ -1,0 +1,385 @@
+--- a/backend/internal/service/gateway_forward.go
++++ b/backend/internal/service/gateway_forward.go
+@@ -137,6 +137,7 @@
+ 				passthroughModel = mappedModel
+ 			}
+ 		}
++		passthroughBody = omitAnthropicThinkingText(passthroughBody, passthroughModel, account.HideThinkingOutputEnabled())
+ 		return s.forwardAnthropicAPIKeyPassthroughWithInput(ctx, c, account, anthropicPassthroughForwardInput{
+ 			Body:          passthroughBody,
+ 			Parsed:        parsed,
+@@ -322,6 +323,13 @@
+ 		logger.LegacyPrintf("service.gateway", "Model mapping applied: %s -> %s (account: %s, source=%s)", originalModel, mappedModel, account.Name, mappingSource)
+ 	}
+ 
++	// Per-account readable reasoning output policy, applied after model mapping.
++	if account.Platform == PlatformAnthropic && account.HideThinkingOutputEnabled() {
++		if err := replaceBody(omitAnthropicThinkingText(body, reqModel, true)); err != nil {
++			return nil, err
++		}
++	}
++
+ 	if s.shouldInjectAnthropicCacheTTL1h(ctx, account) {
+ 		if err := replaceBody(injectAnthropicCacheControlTTL1h(body)); err != nil {
+ 			return nil, err
+--- a/backend/internal/service/gateway_upstream_response.go
++++ b/backend/internal/service/gateway_upstream_response.go
+@@ -993,6 +993,9 @@
+ 			}
+ 		}
+ 
++		if account.HideThinkingOutputEnabled() {
++			eventChanged = redactAnthropicReadableThinkingEvent(event) || eventChanged
++		}
+ 		usagePatch := s.extractSSEUsagePatch(event)
+ 		if anthropicStreamEventIsTerminal(eventName, dataLine) {
+ 			sawTerminalEvent = true
+@@ -1477,6 +1480,7 @@
+ 	}
+ 
+ 	body = reverseToolNamesIfPresent(c, body)
++	body = redactAnthropicThinkingJSON(body, account.HideThinkingOutputEnabled())
+ 
+ 	// 写入响应
+ 	c.Data(resp.StatusCode, contentType, body)
+--- a/backend/internal/service/gateway_anthropic_passthrough.go
++++ b/backend/internal/service/gateway_anthropic_passthrough.go
+@@ -561,7 +561,7 @@
+ 			}
+ 
+ 			if !clientDisconnected {
+-				restored := string(reverseToolNamesIfPresent(c, []byte(line)))
++				restored := string(reverseToolNamesIfPresent(c, []byte(redactAnthropicThinkingSSELine(line, account.HideThinkingOutputEnabled()))))
+ 				if _, err := io.WriteString(w, restored); err != nil {
+ 					clientDisconnected = true
+ 					logger.LegacyPrintf("service.gateway", "[Anthropic passthrough] Client disconnected during streaming, continue draining upstream for usage: account=%d", account.ID)
+@@ -895,6 +895,7 @@
+ 		contentType = "application/json"
+ 	}
+ 	body = reverseToolNamesIfPresent(c, body)
++	body = redactAnthropicThinkingJSON(body, account.HideThinkingOutputEnabled())
+ 	c.Data(resp.StatusCode, contentType, body)
+ 	return usage, nil
+ }
+--- a/backend/internal/service/gemini_messages_compat_service.go
++++ b/backend/internal/service/gemini_messages_compat_service.go
+@@ -560,7 +560,7 @@
+ 		return nil, s.writeClaudeError(c, http.StatusBadRequest, "invalid_request_error", ImageGenerationPermissionMessage())
+ 	}
+ 	geminiReq = ensureGeminiFunctionCallThoughtSignatures(geminiReq)
+-	includeThoughts := req.Stream && claudeRequestEnablesThinking(body)
++	includeThoughts := req.Stream && claudeRequestEnablesThinking(body) && !account.HideThinkingOutputEnabled()
+ 	geminiReq = applyGeminiCompatThinkingConfig(geminiReq, body, mappedModel, includeThoughts)
+ 	originalClaudeBody := body
+ 
+@@ -1122,6 +1122,7 @@
+ 	// Some Gemini upstreams validate tool call parts strictly; ensure any `functionCall` part includes a
+ 	// `thoughtSignature` to avoid frequent INVALID_ARGUMENT 400s.
+ 	body = ensureGeminiFunctionCallThoughtSignatures(body)
++	body = omitGeminiThinkingText(body, account.HideThinkingOutputEnabled())
+ 
+ 	mappedModel := originalModel
+ 	if account.Type == AccountTypeAPIKey || account.Type == AccountTypeServiceAccount {
+--- a/backend/internal/service/openai_gateway_forward.go
++++ b/backend/internal/service/openai_gateway_forward.go
+@@ -30,6 +30,7 @@
+ 		return nil, filterErr
+ 	}
+ 	body = filteredBody
++	body = omitOpenAIReasoningSummary(body, account.HideThinkingOutputEnabled())
+ 	clearGrokResponsesClientToolMapping(c)
+ 	clearOpenAIResponsesClientToolMapping(c)
+ 	clearOpenAIResponsesNamespaceNames(c)
+--- a/frontend/src/components/account/EditAccountModal.vue
++++ b/frontend/src/components/account/EditAccountModal.vue
+@@ -2360,6 +2360,19 @@
+         </template>
+       </section>
+ 
++      <!-- Per-account readable reasoning output control -->
++      <div class="border-t border-gray-200 pt-4 dark:border-dark-600" data-testid="hide-thinking-output-setting">
++        <div class="flex items-center justify-between gap-4">
++          <div>
++            <label class="text-sm font-medium text-gray-900 dark:text-white">隐藏思考链输出</label>
++            <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
++              开启后，支持的 Claude 模型仅返回最终回答（仍保留内部推理和多轮签名）。不支持的上游保留原有输出。
++            </p>
++          </div>
++          <Toggle v-model="hideThinkingOutputEnabled" data-testid="hide-thinking-output-toggle" />
++        </div>
++      </div>
++
+       <!-- Anthropic API Key 自动透传开关 -->
+       <div
+         v-if="account?.platform === 'anthropic' && account?.type === 'apikey'"
+@@ -4180,6 +4193,7 @@
+ type CodexImageToolMode = 'inherit' | 'enabled' | 'disabled' | 'block'
+ const codexImageToolMode = ref<CodexImageToolMode>('inherit')
+ type AnthropicAPIKeyAuthScheme = 'x_api_key' | 'authorization_bearer'
++const hideThinkingOutputEnabled = ref(false)
+ const anthropicPassthroughEnabled = ref(false)
+ const anthropicAPIKeyAuthScheme = ref<AnthropicAPIKeyAuthScheme>('x_api_key')
+ const webSearchEmulationMode = ref('default')
+@@ -4675,6 +4689,7 @@
+   codexCLIOnlyAppServerEnabled.value = false
+   codexFingerprintMode.value = 'off'
+   codexImageToolMode.value = 'inherit'
++  hideThinkingOutputEnabled.value = extra?.hide_thinking_output === true
+   anthropicPassthroughEnabled.value = false
+   anthropicAPIKeyAuthScheme.value = 'x_api_key'
+   webSearchEmulationMode.value = 'default'
+@@ -6408,6 +6423,12 @@
+       updatePayload.extra = newExtra
+     }
+ 
++    // Persist the same opt-in field on accounts of every platform.
++    const thinkingExtra = { ...((updatePayload.extra as Record<string, unknown> | undefined) || (props.account.extra as Record<string, unknown> | undefined) || {}) }
++    if (hideThinkingOutputEnabled.value) thinkingExtra.hide_thinking_output = true
++    else delete thinkingExtra.hide_thinking_output
++    updatePayload.extra = thinkingExtra
++
+     const canContinue = await ensureAntigravityMixedChannelConfirmed(async () => {
+       await submitUpdateAccount(accountID, updatePayload)
+     })
+--- /dev/null
++++ b/backend/internal/service/gateway_hide_thinking.go
+@@ -0,0 +1,149 @@
++package service
++
++import (
++    "encoding/json"
++    "strings"
++
++    "github.com/Wei-Shaw/sub2api/internal/pkg/claude"
++    "github.com/tidwall/gjson"
++    "github.com/tidwall/sjson"
++)
++
++// HideThinkingOutputEnabled is an opt-in per-account presentation setting.
++// The setting does not disable model reasoning or change usage accounting.
++func (a *Account) HideThinkingOutputEnabled() bool {
++    if a == nil || a.Extra == nil { return false }
++    enabled, ok := a.Extra["hide_thinking_output"].(bool)
++    return ok && enabled
++}
++
++// omitAnthropicThinkingText asks supported Claude models not to return readable
++// thinking text. It preserves native signatures and signed message history.
++// For models/protocols without an omission contract, return the body unchanged;
++// stripping reasoning from signed multi-turn transcripts is unsafe.
++func omitAnthropicThinkingText(body []byte, model string, enabled bool) []byte {
++    if !enabled || !gjson.ValidBytes(body) { return body }
++    model = strings.TrimSpace(model)
++    if model == "" { model = gjson.GetBytes(body, "model").String() }
++    thinkingType := gjson.GetBytes(body, "thinking.type").String()
++    if claude.IsOpus55(model) || claude.IsSonnet55(model) || claude.IsHaiku55(model) {
++        // Do not turn on adaptive thinking if the client did not request it.
++        // Newer models already default to omitted display. Preserve the
++        // requested mode, budget, and effort to avoid unintended extra cost.
++        if thinkingType != "adaptive" { return body }
++        next, err := sjson.SetBytes(body, "thinking.display", "omitted")
++        if err == nil { return next }
++        return body
++    }
++    // On other Claude models, both manual extended thinking (enabled) and
++    // adaptive thinking accept display=omitted. Preserve their mode and budget.
++    // Never synthesize a new thinking mode for older models.
++    if strings.HasPrefix(strings.ToLower(model), "claude-") && (thinkingType == "adaptive" || thinkingType == "enabled") {
++        next, err := sjson.SetBytes(body, "thinking.display", "omitted")
++        if err == nil { return next }
++    }
++    return body
++}
++
++
++// omitGeminiThinkingText prevents exposure of plaintext thought parts without
++// changing thinking level, thinking budget, or signed tool-call history.
++// Absent includeThoughts already defaults to false; do not synthesize fields.
++func omitGeminiThinkingText(body []byte, enabled bool) []byte {
++    if !enabled || !gjson.ValidBytes(body) { return body }
++    next := body
++    for _, path := range []string{
++        "generationConfig.thinkingConfig.includeThoughts",
++        "generation_config.thinking_config.include_thoughts",
++    } {
++        if !gjson.GetBytes(next, path).Exists() { continue }
++        if updated, err := sjson.SetBytes(next, path, false); err == nil {
++            next = updated
++        }
++    }
++    return next
++}
++
++// omitOpenAIReasoningSummary leaves model reasoning and any opaque state intact;
++// it only removes the client's explicit request for a readable summary.
++func omitOpenAIReasoningSummary(body []byte, enabled bool) []byte {
++    if !enabled || !gjson.GetBytes(body, "reasoning.summary").Exists() { return body }
++    next, err := sjson.DeleteBytes(body, "reasoning.summary")
++    if err != nil { return body }
++    if gjson.GetBytes(next, "reasoning").IsObject() && len(gjson.GetBytes(next, "reasoning").Map()) == 0 {
++        if cleaned, deleteErr := sjson.DeleteBytes(next, "reasoning"); deleteErr == nil { return cleaned }
++    }
++    return next
++}
++
++
++// redactAnthropicReadableThinkingEvent only alters client-visible plaintext.
++// Signed deltas and content-block boundaries must remain intact for tool-use
++// round trips, including models with encrypted thinking history.
++func redactAnthropicReadableThinkingEvent(event map[string]any) bool {
++    if event == nil { return false }
++    switch event["type"] {
++    case "content_block_start":
++        block, ok := event["content_block"].(map[string]any)
++        if ok && block["type"] == "thinking" {
++            if txt, ok := block["thinking"].(string); ok && txt != "" {
++                block["thinking"] = ""
++                return true
++            }
++        }
++    case "content_block_delta":
++        delta, ok := event["delta"].(map[string]any)
++        if ok && delta["type"] == "thinking_delta" {
++            if txt, ok := delta["thinking"].(string); ok && txt != "" {
++                delta["thinking"] = ""
++                return true
++            }
++        }
++    case "message_start":
++        if msg, ok := event["message"].(map[string]any); ok {
++            return redactAnthropicThinkingContent(msg)
++        }
++    }
++    return false
++}
++
++func redactAnthropicThinkingContent(msg map[string]any) bool {
++    items, ok := msg["content"].([]any)
++    if !ok { return false }
++    changed := false
++    for _, item := range items {
++        b, ok := item.(map[string]any)
++        if !ok || b["type"] != "thinking" { continue }
++        if txt, ok := b["thinking"].(string); ok && txt != "" {
++            b["thinking"] = ""
++            changed = true
++        }
++    }
++    return changed
++}
++
++// Applied after usage accounting, just before sending downstream JSON.
++func redactAnthropicThinkingJSON(body []byte, enabled bool) []byte {
++    if !enabled { return body }
++    var msg map[string]any
++    if json.Unmarshal(body, &msg) != nil { return body }
++    if !redactAnthropicThinkingContent(msg) { return body }
++    output, err := json.Marshal(msg)
++    if err != nil { return body }
++    return output
++}
++
++// Applied to a single SSE data line (event framing remains unmodified).
++// Invalid JSON is passed through; valid thinking deltas are emptied.
++func redactAnthropicThinkingSSELine(line string, enabled bool) string {
++    if !enabled { return line }
++    if !strings.HasPrefix(line, "data:") { return line }
++    start := len("data:")
++    for start < len(line) && (line[start] == ' ' || line[start] == '\t') { start++ }
++    var obj map[string]any
++    if json.Unmarshal([]byte(line[start:]), &obj) != nil { return line }
++    if !redactAnthropicReadableThinkingEvent(obj) { return line }
++    b, err := json.Marshal(obj)
++    if err != nil { return line }
++    return line[:start] + string(b)
++}
+--- /dev/null
++++ b/backend/internal/service/gateway_hide_thinking_test.go
+@@ -0,0 +1,85 @@
++package service
++
++import (
++ "testing"
++ "github.com/stretchr/testify/require"
++ "github.com/tidwall/gjson"
++)
++
++func TestHideThinkingOutputPerAccount(t *testing.T) {
++ require.False(t, (&Account{}).HideThinkingOutputEnabled())
++ require.False(t, (&Account{Extra: map[string]any{"hide_thinking_output": "true"}}).HideThinkingOutputEnabled())
++ require.True(t, (&Account{Extra: map[string]any{"hide_thinking_output": true}}).HideThinkingOutputEnabled())
++}
++func TestOmitAnthropicThinkingText(t *testing.T) {
++ original := []byte(`{"model":"claude-opus-5-5","messages":[{"role":"assistant","content":[{"type":"thinking","thinking":"","signature":"keep-signed"}]}]}`)
++ out := omitAnthropicThinkingText(original, "claude-opus-5-5", true)
++ // A display-only flag must not enable adaptive reasoning on its own.
++ require.Equal(t, string(original), string(out))
++ requested := []byte(`{"model":"claude-opus-5-5","thinking":{"type":"adaptive"},"output_config":{"effort":"max"},"messages":[{"role":"assistant","content":[{"type":"thinking","thinking":"","signature":"keep-signed"}]}]}`)
++ out = omitAnthropicThinkingText(requested, "claude-opus-5-5", true)
++ require.Equal(t, "omitted", gjson.GetBytes(out, "thinking.display").String())
++ require.Equal(t, "adaptive", gjson.GetBytes(out, "thinking.type").String())
++ require.Equal(t, "max", gjson.GetBytes(out, "output_config.effort").String())
++ require.Equal(t, "keep-signed", gjson.GetBytes(out, "messages.0.content.0.signature").String())
++ require.Equal(t, string(original), string(omitAnthropicThinkingText(original,"claude-opus-5-5",false)))
++ b := []byte(`{"model":"claude-sonnet-5-5","thinking":{"type":"between_tools"}}`)
++ require.Equal(t, string(b),string(omitAnthropicThinkingText(b,"claude-sonnet-5-5",true)))
++ b=[]byte(`{"model":"claude-haiku-4-5","thinking":{"type":"enabled","budget_tokens":1024}}`)
++ require.Equal(t,"omitted",gjson.GetBytes(omitAnthropicThinkingText(b,"claude-haiku-4-5",true),"thinking.display").String())
++ require.Equal(t,"enabled",gjson.GetBytes(omitAnthropicThinkingText(b,"claude-haiku-4-5",true),"thinking.type").String())
++ require.Equal(t,int64(1024),gjson.GetBytes(omitAnthropicThinkingText(b,"claude-haiku-4-5",true),"thinking.budget_tokens").Int())
++}
++
++
++func TestOmitGeminiThinkingTextPreservesEffortAndSignature(t *testing.T) {
++    original := []byte(`{"generationConfig":{"thinkingConfig":{"thinkingLevel":"high","includeThoughts":true}},"contents":[{"parts":[{"functionCall":{"name":"lookup"},"thoughtSignature":"opaque"}]}]}`)
++    visible := omitGeminiThinkingText(original, false)
++    require.Equal(t, string(original), string(visible))
++    omitted := omitGeminiThinkingText(original, true)
++    require.False(t, gjson.GetBytes(omitted, "generationConfig.thinkingConfig.includeThoughts").Bool())
++    require.Equal(t, "high", gjson.GetBytes(omitted, "generationConfig.thinkingConfig.thinkingLevel").String())
++    require.Equal(t, "opaque", gjson.GetBytes(omitted, "contents.0.parts.0.thoughtSignature").String())
++}
++
++func TestOmitOpenAIReasoningSummaryPreservesEffort(t *testing.T) {
++    original := []byte(`{"model":"gpt-6","reasoning":{"effort":"high","summary":"auto"},"input":"hello"}`)
++    require.Equal(t, string(original), string(omitOpenAIReasoningSummary(original, false)))
++    omitted := omitOpenAIReasoningSummary(original, true)
++    require.False(t, gjson.GetBytes(omitted, "reasoning.summary").Exists())
++    require.Equal(t, "high", gjson.GetBytes(omitted, "reasoning.effort").String())
++    require.Equal(t, "hello", gjson.GetBytes(omitted, "input").String())
++}
++
++func TestRedactAnthropicThinkingSSELine(t *testing.T) {
++    thinking := `data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"private summary"}}`
++    cleaned := redactAnthropicThinkingSSELine(thinking, true)
++    require.Equal(t, "", gjson.Get(cleaned[6:], "delta.thinking").String())
++    require.Equal(t, "thinking_delta", gjson.Get(cleaned[6:], "delta.type").String())
++    require.Equal(t, int64(0), gjson.Get(cleaned[6:], "index").Int())
++    require.Equal(t, thinking, redactAnthropicThinkingSSELine(thinking, false))
++    require.Equal(t, cleaned, redactAnthropicThinkingSSELine(cleaned, true))
++
++    signature := `data: {"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"opaque-full-thinking"}}`
++    require.Equal(t, signature, redactAnthropicThinkingSSELine(signature, true))
++    tool := `data: {"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"toolu_1","name":"test","input":{}}}`
++    require.Equal(t, tool, redactAnthropicThinkingSSELine(tool, true))
++    text := `data: {"type":"content_block_delta","index":2,"delta":{"type":"text_delta","text":"Final answer"}}`
++    require.Equal(t, text, redactAnthropicThinkingSSELine(text, true))
++    usage := `data: {"type":"message_delta","usage":{"output_tokens":41253}}`
++    require.Equal(t, usage, redactAnthropicThinkingSSELine(usage, true))
++    invalid := "data: {invalid"
++    require.Equal(t, invalid, redactAnthropicThinkingSSELine(invalid, true))
++}
++
++func TestRedactAnthropicThinkingJSON(t *testing.T) {
++    original := []byte(`{"content":[{"type":"thinking","thinking":"sensitive summary","signature":"opaque"},{"type":"tool_use","id":"toolu_1","name":"test","input":{"x":1}},{"type":"text","text":"Done"}],"usage":{"output_tokens":41253}}`)
++    require.Equal(t, string(original), string(redactAnthropicThinkingJSON(original,false)))
++    cleaned := redactAnthropicThinkingJSON(original,true)
++    require.Equal(t, "", gjson.GetBytes(cleaned,"content.0.thinking").String())
++    require.Equal(t, "opaque", gjson.GetBytes(cleaned,"content.0.signature").String())
++    require.Equal(t, "toolu_1", gjson.GetBytes(cleaned,"content.1.id").String())
++    require.Equal(t, int64(1), gjson.GetBytes(cleaned,"content.1.input.x").Int())
++    require.Equal(t, "Done", gjson.GetBytes(cleaned,"content.2.text").String())
++    require.Equal(t, int64(41253), gjson.GetBytes(cleaned,"usage.output_tokens").Int())
++}
+
+[executed on device: vps3506946 (68244f99-600d-4fbc-b875-a7daad5dec9a)]
