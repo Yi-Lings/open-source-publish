@@ -14,6 +14,8 @@ Each build starts from a **fresh official source archive**, applies the patch wi
 
 ## Upgrade commands on the VPS
 
+The admin version panel links to the patch build status and shows the host upgrade command. In-place binary updates and rollbacks are disabled in this edition so the running container always matches its tested image. The panel shows the latest official upstream version. Use the host check below to see the newest tested patched release.
+
 ```bash
 # Check latest compatible version (no changes).
 sudo sub2api-maintained-upgrade --check

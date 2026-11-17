@@ -62,7 +62,7 @@ jobs:
           mkdir src
           curl --fail --location --retry 3 --silent --show-error             "https://api.github.com/repos/Wei-Shaw/sub2api/tarball/${UPSTREAM_TAG}"             | tar -xz -C src --strip-components=1
           cd src
-          patch --batch --forward --fuzz=0 -p1 < "$GITHUB_WORKSPACE/ci/sub2api-maintained/feature.patch"
+          patch --batch --forward --fuzz=0 --no-backup-if-mismatch -p1 < "$GITHUB_WORKSPACE/ci/sub2api-maintained/feature.patch"
           if find . -name '*.rej' | grep -q .; then
             echo "Patch conflicts with upstream $UPSTREAM_TAG. No image will be published." >&2
             exit 1
@@ -73,14 +73,14 @@ jobs:
           go-version-file: src/backend/go.mod
           cache: true
           cache-dependency-path: src/backend/go.sum
-      - name: Verify thinking filtering and signatures
+      - name: Verify thinking visibility and managed upgrades
         if: steps.release.outputs.skip != 'true'
         shell: bash
         run: |
           set -euo pipefail
           cd src/backend
           gofmt -w internal/service/gateway_hide_thinking.go internal/service/gateway_hide_thinking_test.go
-          go test ./internal/service -run '^Test(HideThinkingOutputPerAccount|OmitAnthropicThinkingText|OmitGeminiThinkingTextPreservesEffortAndSignature|OmitOpenAIReasoningSummaryPreservesEffort|RedactAnthropicThinkingSSELine|RedactAnthropicThinkingJSON)$' -count=1 -timeout 10m
+          go test ./internal/service -run '^Test(HideThinkingOutputPerAccount|OmitAnthropicThinkingText|OmitGeminiThinkingTextPreservesEffortAndSignature|OmitOpenAIReasoningSummaryPreservesEffort|RedactAnthropicThinkingSSELine|RedactAnthropicThinkingJSON|AnthropicPassthroughRedactsThinkingAtResponseBoundary|UpdateServiceRejectsManagedImageInPlaceUpgrade)$' -count=1 -timeout 10m
       - name: Build upstream release with custom patch
         if: steps.release.outputs.skip != 'true'
         shell: bash
