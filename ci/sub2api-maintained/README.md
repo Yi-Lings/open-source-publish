@@ -14,7 +14,11 @@ Each build starts from a **fresh official source archive**, applies the patch wi
 
 ## Upgrade commands on the VPS
 
-The admin version panel links to the patch build status and shows the host upgrade command. In-place binary updates and rollbacks are disabled in this edition so the running container always matches its tested image. The panel shows the latest official upstream version. Use the host check below to see the newest tested patched release.
+After the one-time host setup below, open the admin version menu and click **Install** for the tested patched release. The panel polls deployment status and reloads after the service becomes healthy.
+
+The host updater listens on a Unix socket that is mounted read-only into the Sub2API container. The admin API exposes a status query and a request to install the currently selected, CI-tested release. The host process calls the existing backup, checksum and Compose deployment script.
+
+To activate the panel on an existing host, install the updater as root with `bash ci/sub2api-maintained/install-panel-upgrade.sh`. Then use the CLI below once to deploy an image containing the panel and its read-only socket mount. Subsequent upgrades can be initiated from the panel. The CLI remains available for host maintenance.
 
 ```bash
 # Check latest compatible version (no changes).

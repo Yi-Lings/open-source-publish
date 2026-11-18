@@ -1,5 +1,102 @@
+diff --git a/backend/internal/handler/admin/managed_upgrade.go b/backend/internal/handler/admin/managed_upgrade.go
+new file mode 100644
+index 0000000..9751ba9
+--- /dev/null
++++ b/backend/internal/handler/admin/managed_upgrade.go
+@@ -0,0 +1,78 @@
++package admin
++
++import (
++	"bytes"
++	"context"
++	"encoding/json"
++	"io"
++	"net"
++	"net/http"
++	"time"
++
++	"github.com/Wei-Shaw/sub2api/internal/pkg/response"
++	"github.com/gin-gonic/gin"
++)
++
++const managedUpgradeSocket = "/run/sub2api-maintained-panel/upgrade.sock"
++
++var managedUpgradeClient = &http.Client{
++	Timeout: 5 * time.Second,
++	CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
++		return http.ErrUseLastResponse
++	},
++	Transport: &http.Transport{
++		DisableKeepAlives: true,
++		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
++			return (&net.Dialer{}).DialContext(ctx, "unix", managedUpgradeSocket)
++		},
++	},
++}
++
++// GetManagedUpgrade exposes the host updater status to authenticated administrators.
++func (h *SystemHandler) GetManagedUpgrade(c *gin.Context) {
++	c.Header("Cache-Control", "no-store")
++	requestManagedUpgrade(c, http.MethodGet, "/status", nil)
++}
++
++// StartManagedUpgrade requests installation of the tested release shown in the panel.
++func (h *SystemHandler) StartManagedUpgrade(c *gin.Context) {
++	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, 512)
++	var input struct {
++		Release string `json:"release" binding:"required,max=80"`
++	}
++	if err := c.ShouldBindJSON(&input); err != nil {
++		response.BadRequest(c, "A tested release is required.")
++		return
++	}
++	payload, _ := json.Marshal(input)
++	requestManagedUpgrade(c, http.MethodPost, "/apply", payload)
++}
++
++func requestManagedUpgrade(c *gin.Context, method, path string, payload []byte) {
++	req, err := http.NewRequestWithContext(c.Request.Context(), method, "http://localhost"+path, bytes.NewReader(payload))
++	if err != nil {
++		response.Error(c, http.StatusServiceUnavailable, "Host updater is unavailable.")
++		return
++	}
++	req.Header.Set("Content-Type", "application/json")
++	res, err := managedUpgradeClient.Do(req)
++	if err != nil {
++		response.Error(c, http.StatusServiceUnavailable, "Host updater is unavailable.")
++		return
++	}
++	defer res.Body.Close()
++
++	switch res.StatusCode {
++	case http.StatusOK, http.StatusAccepted:
++		body, err := io.ReadAll(io.LimitReader(res.Body, 8192))
++		if err != nil || !json.Valid(body) {
++			response.Error(c, http.StatusBadGateway, "Invalid response from the host updater.")
++			return
++		}
++		response.Success(c, json.RawMessage(body))
++	case http.StatusConflict:
++		response.Error(c, http.StatusConflict, "The requested release is no longer installable. Refresh update status.")
++	default:
++		response.Error(c, http.StatusBadGateway, "Host updater could not process the request.")
++	}
++}
+diff --git a/backend/internal/server/routes/admin.go b/backend/internal/server/routes/admin.go
+index 51efcd3..a96c00b 100644
+--- a/backend/internal/server/routes/admin.go
++++ b/backend/internal/server/routes/admin.go
+@@ -681,6 +681,8 @@ func registerSystemRoutes(admin *gin.RouterGroup, h *handler.Handlers) {
+ 		system.GET("/check-updates", h.Admin.System.CheckUpdates)
+ 		system.GET("/rollback-versions", h.Admin.System.GetRollbackVersions)
+ 		system.POST("/update", h.Admin.System.PerformUpdate)
++		system.GET("/managed-upgrade", h.Admin.System.GetManagedUpgrade)
++		system.POST("/managed-upgrade", h.Admin.System.StartManagedUpgrade)
+ 		system.POST("/rollback", h.Admin.System.Rollback)
+ 		system.POST("/restart", h.Admin.System.RestartService)
+ 	}
 diff --git a/backend/internal/service/gateway_anthropic_passthrough.go b/backend/internal/service/gateway_anthropic_passthrough.go
-index a781b69..7bc3912 100644
+index 5bf8fbb..0fc749c 100644
 --- a/backend/internal/service/gateway_anthropic_passthrough.go
 +++ b/backend/internal/service/gateway_anthropic_passthrough.go
 @@ -568,7 +568,8 @@ func (s *GatewayService) handleStreamingResponseAnthropicAPIKeyPassthrough(
@@ -12,7 +109,7 @@ index a781b69..7bc3912 100644
  				if _, err := io.WriteString(w, restored); err != nil {
  					clientDisconnected = true
  					logger.LegacyPrintf("service.gateway", "[Anthropic passthrough] Client disconnected during streaming, continue draining upstream for usage: account=%d", account.ID)
-@@ -903,6 +904,7 @@ func (s *GatewayService) handleNonStreamingResponseAnthropicAPIKeyPassthrough(
+@@ -851,6 +852,7 @@ func (s *GatewayService) handleNonStreamingResponseAnthropicAPIKeyPassthrough(
  	}
  	body = restoreCompositeClientModel(ctx, body)
  	body = reverseToolNamesIfPresent(c, body)
@@ -409,7 +506,7 @@ index 0000000..259d64a
 +	require.Equal(t, int64(41253), gjson.GetBytes(cleaned, "usage.output_tokens").Int())
 +}
 diff --git a/backend/internal/service/gateway_upstream_response.go b/backend/internal/service/gateway_upstream_response.go
-index 4e1dcf9..bba6f63 100644
+index ae1d2f2..c91111e 100644
 --- a/backend/internal/service/gateway_upstream_response.go
 +++ b/backend/internal/service/gateway_upstream_response.go
 @@ -1066,6 +1066,9 @@ func (s *GatewayService) handleStreamingResponse(ctx context.Context, resp *http
@@ -422,7 +519,7 @@ index 4e1dcf9..bba6f63 100644
  		usagePatch := s.extractSSEUsagePatch(event)
  		if anthropicStreamEventIsTerminal(eventName, dataLine) {
  			sawTerminalEvent = true
-@@ -1551,6 +1554,7 @@ func (s *GatewayService) handleNonStreamingResponse(ctx context.Context, resp *h
+@@ -1568,6 +1571,7 @@ func (s *GatewayService) handleNonStreamingResponse(ctx context.Context, resp *h
  	}
  
  	body = reverseToolNamesIfPresent(c, body)
@@ -583,8 +680,116 @@ index dc992ab..0193e65 100644
      const canContinue = await ensureAntigravityMixedChannelConfirmed(async () => {
        await submitUpdateAccount(accountID, updatePayload)
      })
+diff --git a/frontend/src/components/common/ManagedUpgradePanel.vue b/frontend/src/components/common/ManagedUpgradePanel.vue
+new file mode 100644
+index 0000000..791a666
+--- /dev/null
++++ b/frontend/src/components/common/ManagedUpgradePanel.vue
+@@ -0,0 +1,102 @@
++<template>
++  <div class="space-y-2">
++    <p class="text-xs text-gray-600 dark:text-dark-300" aria-live="polite">
++      {{ t(statusMessage) }}
++    </p>
++    <button
++      v-if="status?.update_available || inProgress"
++      type="button"
++      class="btn btn-primary w-full text-xs"
++      :disabled="inProgress || unreachable"
++      @click="install"
++    >
++      {{ inProgress ? t('version.updating') : t('version.installTestedRelease', { version: releaseVersion }) }}
++    </button>
++    <a
++      href="https://github.com/Yi-Lings/open-source-publish/actions/workflows/sub2api-upstream-patch.yml"
++      target="_blank"
++      rel="noopener noreferrer"
++      class="block text-xs text-primary-600 hover:underline dark:text-primary-400"
++    >
++      {{ t('version.managedBuildStatus') }}
++    </a>
++  </div>
++</template>
++
++<script setup lang="ts">
++import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
++import { useI18n } from 'vue-i18n'
++import { apiClient } from '@/api/client'
++
++interface UpgradeStatus {
++  state: 'checking' | 'ready' | 'running' | 'succeeded' | 'failed' | 'unavailable'
++  latest_release: string
++  update_available: boolean
++}
++
++const endpoint = '/admin/system/managed-upgrade'
++const { t } = useI18n()
++const status = ref<UpgradeStatus>()
++const submitting = ref(false)
++const unreachable = ref(false)
++const rejected = ref(false)
++const inProgress = computed(() => submitting.value || status.value?.state === 'running')
++const releaseVersion = computed(() => status.value?.latest_release.match(/^sub2api-patched-(v[\d.]+)-/)?.[1] ?? '')
++const statusMessage = computed(() => {
++  if (inProgress.value) return 'version.managedUpgradeRunning'
++  if (unreachable.value || status.value?.state === 'unavailable') return 'version.managedUpgradeUnavailable'
++  if (rejected.value || status.value?.state === 'failed') return 'version.managedUpgradeFailed'
++  if (status.value?.state === 'succeeded' && !status.value.update_available) return 'version.managedUpgradeSucceeded'
++  if (status.value?.update_available) return 'version.managedUpgradeReady'
++  if (!status.value || status.value.state === 'checking') return 'version.managedUpgradeChecking'
++  return 'version.managedUpgradeCurrent'
++})
++
++let timer: ReturnType<typeof setTimeout> | undefined
++let mounted = false
++let observedRunning = false
++let revision = 0
++
++function receive(next: UpgradeStatus) {
++  status.value = next
++  unreachable.value = false
++  if (next.state === 'running') observedRunning = true
++  if (observedRunning && next.state === 'succeeded') window.location.reload()
++}
++
++async function refresh() {
++  const requestRevision = revision
++  try {
++    const { data } = await apiClient.get<UpgradeStatus>(endpoint, { timeout: 6500 })
++    if (mounted && requestRevision === revision && !submitting.value) receive(data)
++  } catch {
++    if (mounted && requestRevision === revision) unreachable.value = true
++  } finally {
++    if (mounted) timer = setTimeout(refresh, inProgress.value ? 2500 : 7000)
++  }
++}
++
++async function install() {
++  if (!status.value?.update_available || inProgress.value) return
++  revision++
++  submitting.value = true
++  rejected.value = false
++  try {
++    const { data } = await apiClient.post<UpgradeStatus>(endpoint, { release: status.value.latest_release }, { timeout: 6500 })
++    if (mounted) receive(data)
++  } catch {
++    rejected.value = true
++  } finally {
++    submitting.value = false
++  }
++}
++
++onMounted(() => {
++  mounted = true
++  void refresh()
++})
++onBeforeUnmount(() => {
++  mounted = false
++  clearTimeout(timer)
++})
++</script>
 diff --git a/frontend/src/components/common/VersionBadge.vue b/frontend/src/components/common/VersionBadge.vue
-index 7fd6294..4664099 100644
+index 7fd6294..e64296b 100644
 --- a/frontend/src/components/common/VersionBadge.vue
 +++ b/frontend/src/components/common/VersionBadge.vue
 @@ -108,7 +108,7 @@
@@ -596,68 +801,69 @@ index 7fd6294..4664099 100644
                        : t('version.upToDate')
                    }}
                  </p>
-@@ -231,6 +231,28 @@
+@@ -231,6 +231,8 @@
                  </button>
                </div>
  
-+              <div v-else-if="isManagedBuild" class="space-y-2">
-+                <p class="text-xs text-gray-600 dark:text-dark-300">
-+                  {{ t('version.managedUpgradeHint') }}
-+                </p>
-+                <button
-+                  type="button"
-+                  class="w-full break-all rounded-md bg-gray-100 p-2 text-left font-mono text-xs text-gray-800 hover:bg-gray-200 dark:bg-dark-700 dark:text-dark-100"
-+                  :title="t('version.copyCommand')"
-+                  @click="copyToClipboard(managedUpgradeCommand)"
-+                >
-+                  {{ managedUpgradeCommand }}
-+                </button>
-+                <a
-+                  href="https://github.com/Yi-Lings/open-source-publish/actions/workflows/sub2api-upstream-patch.yml"
-+                  target="_blank"
-+                  rel="noopener noreferrer"
-+                  class="block text-xs text-primary-600 hover:underline dark:text-primary-400"
-+                >
-+                  {{ t('version.managedBuildStatus') }}
-+                </a>
-+              </div>
++              <ManagedUpgradePanel v-else-if="isManagedBuild" />
 +
                <!-- Priority 3: Update available for source build - show git pull hint -->
                <div v-else-if="hasUpdate && !isReleaseBuild" class="space-y-2">
                  <a
-@@ -676,6 +698,8 @@ const latestVersion = computed(() => appStore.latestVersion)
+@@ -650,6 +652,7 @@ import {
+ } from '@/api/admin/system'
+ import { useClipboard } from '@/composables/useClipboard'
+ import Icon from '@/components/icons/Icon.vue'
++import ManagedUpgradePanel from './ManagedUpgradePanel.vue'
+ 
+ const GITHUB_REPO = 'Wei-Shaw/sub2api'
+ // Docker Hub image published by CI (tags carry no "v" prefix, e.g. weishaw/sub2api:0.1.146)
+@@ -676,6 +679,7 @@ const latestVersion = computed(() => appStore.latestVersion)
  const hasUpdate = computed(() => appStore.hasUpdate)
  const releaseInfo = computed(() => appStore.releaseInfo)
  const buildType = computed(() => appStore.buildType)
 +const isManagedBuild = computed(() => currentVersion.value.endsWith('-thinking'))
-+const managedUpgradeCommand = 'sudo sub2api-maintained-upgrade --apply'
  
  // Update process states (local to this component)
  const updating = ref(false)
 diff --git a/frontend/src/i18n/locales/en/misc.ts b/frontend/src/i18n/locales/en/misc.ts
-index 0888751..7751e3d 100644
+index 0888751..3c7b2be 100644
 --- a/frontend/src/i18n/locales/en/misc.ts
 +++ b/frontend/src/i18n/locales/en/misc.ts
-@@ -21,6 +21,9 @@ export default {
+@@ -21,6 +21,16 @@ export default {
    version: {
      currentVersion: 'Current Version',
      latestVersion: 'Latest Version',
 +    upstreamVersion: 'Latest upstream version',
-+    managedUpgradeHint: 'This instance uses a patched Docker image. Run this command on the server to install the latest tested patched release.',
++    installTestedRelease: 'Install {version}',
++    managedUpgradeRunning: 'An update is running. The service will restart briefly after the backup.',
++    managedUpgradeUnavailable: 'The host updater or release check is temporarily unavailable.',
++    managedUpgradeFailed: 'The update did not start or complete. Check the current release and try again.',
++    managedUpgradeSucceeded: 'The update completed.',
++    managedUpgradeReady: 'A tested patched build is available.',
++    managedUpgradeChecking: 'Checking for a tested patched build…',
++    managedUpgradeCurrent: 'The latest tested patched build is installed.',
 +    managedBuildStatus: 'View patched build status',
      upToDate: "You're running the latest version.",
      updateAvailable: 'A new version is available!',
      releaseNotes: 'Release Notes',
 diff --git a/frontend/src/i18n/locales/zh/misc.ts b/frontend/src/i18n/locales/zh/misc.ts
-index 2c61524..407d730 100644
+index 2c61524..7bb8997 100644
 --- a/frontend/src/i18n/locales/zh/misc.ts
 +++ b/frontend/src/i18n/locales/zh/misc.ts
-@@ -21,6 +21,9 @@ export default {
+@@ -21,6 +21,16 @@ export default {
    version: {
      currentVersion: '当前版本',
      latestVersion: '最新版本',
 +    upstreamVersion: '上游最新版本',
-+    managedUpgradeHint: '此实例使用带 Thinking 补丁的 Docker 镜像。在服务器终端运行以下命令，安装通过测试的补丁版。',
++    installTestedRelease: '安装 {version}',
++    managedUpgradeRunning: '正在升级。备份完成后，服务会短暂重启。',
++    managedUpgradeUnavailable: '暂时无法连接升级服务或检查补丁版。',
++    managedUpgradeFailed: '升级未启动或未完成，请核对当前版本后重试。',
++    managedUpgradeSucceeded: '升级完成。',
++    managedUpgradeReady: '有通过测试的补丁版可安装。',
++    managedUpgradeChecking: '正在检查通过测试的补丁版…',
++    managedUpgradeCurrent: '已安装最新通过测试的补丁版。',
 +    managedBuildStatus: '查看补丁构建状态',
      upToDate: '已是最新版本',
      updateAvailable: '有新版本可用！',
